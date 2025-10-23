@@ -3,9 +3,9 @@ import mediapipe as mp
 import numpy as np
 import time
 
-target_point = None
+target_points = []  # Changed to list to store multiple points
 
-file_name = 'videoblocks-628c9f487b03172f6842a500_b4btxoswc__4c6cef5fc8ea2a5e59a5e640850150cf__P360.mp4'
+file_name = 'plane.MOV'
 
 # 3D model points for key facial landmarks (in mm, relative to face center)
 model_points = np.array([
@@ -47,7 +47,7 @@ def get_2d_points(face_landmarks, image_shape):
     return np.array(image_points, dtype=np.float32)
 
 def point_on_extended_line(target_point, nose_start, nose_end, threshold=30):
-    """Check if target point is near the extended nose direction line."""
+    """Check if target point is near the nose direction line AND in front of the face."""
     target = np.array(target_point, dtype=np.float32)
     start = np.array(nose_start, dtype=np.float32)
     end = np.array(nose_end, dtype=np.float32)
@@ -60,6 +60,12 @@ def point_on_extended_line(target_point, nose_start, nose_end, threshold=30):
     direction = direction / direction_norm
     to_target = target - start
     projection_length = np.dot(to_target, direction)
+    
+    # Check if the point is in front (positive projection) or behind (negative projection)
+    if projection_length < 0:
+        # Point is behind the nose direction - not intersecting
+        return False, float('inf')
+    
     projection_point = start + projection_length * direction
     distance = np.linalg.norm(target - projection_point)
     return distance <= threshold, distance
@@ -97,16 +103,30 @@ def draw_pose(image, rotation_vector, translation_vector, camera_matrix, dist_co
     # Draw nose direction line
     cv2.arrowedLine(image, nose_start, nose_end, (0, 255, 255), 4)
 
-    # If user selected a target point, check proximity to the nose line
-    if target_point is not None:
-        is_intersecting, distance = point_on_extended_line(target_point, nose_start, nose_end, threshold=50)
-        color = (0, 255, 0) if is_intersecting else (0, 0, 255)
-        cv2.circle(image, target_point, 12, color, -1)
-        cv2.putText(image, f"Target", (target_point[0] + 16, target_point[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        cv2.putText(image, f"Dist: {distance:.1f}px", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        if is_intersecting:
+    # Check all target points against the nose line
+    if target_points:
+        y_offset = 60
+        any_intersecting = False
+        for idx, target_point in enumerate(target_points):
+            is_intersecting, distance = point_on_extended_line(target_point, nose_start, nose_end, threshold=50)
+            color = (0, 255, 0) if is_intersecting else (0, 0, 255)
+            
+            # Draw circle with number
+            cv2.circle(image, target_point, 12, color, -1)
+            cv2.putText(image, f"{idx+1}", (target_point[0] - 5, target_point[1] + 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Display distance info
+            cv2.putText(image, f"Point {idx+1}: {distance:.1f}px", (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            y_offset += 25
+            
+            if is_intersecting:
+                any_intersecting = True
+                print(f'Point {idx+1} Intersect')
+        
+        if any_intersecting:
             cv2.putText(image, "INTERSECTING!", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            print('Intersect')
 
     # Display a simple pose indicator (approx. rotation vector magnitude)
     try:
@@ -116,12 +136,21 @@ def draw_pose(image, rotation_vector, translation_vector, camera_matrix, dist_co
         pass
 
 def mouse_callback(event, x, y, flags, param):
-    global target_point
+    global target_points
     if event == cv2.EVENT_LBUTTONDOWN:
-        target_point = (x, y)
-        print(f"Target point set to: {target_point}")
+        target_points.append((x, y))
+        print(f"Target point {len(target_points)} added at: {(x, y)}")
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        # Right click to remove the last point
+        if target_points:
+            removed = target_points.pop()
+            print(f"Removed last point: {removed}")
+        else:
+            print("No points to remove")
 
 mp_drawing = mp.solutions.drawing_utils
+thin_landmark_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
+thin_connection_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_face_mesh = mp.solutions.face_mesh
 
@@ -136,7 +165,9 @@ def open_capture(source):
     return cap
 
 def main():
-    source = file_name
+    # Start with video file, can toggle to webcam
+    use_webcam = False
+    source = file_name if not use_webcam else 0
 
     cap = open_capture(source)
     if not cap.isOpened():
@@ -148,6 +179,10 @@ def main():
         source_fps = 30.0   # fallback if FPS is unknown
     frame_delay_ms = int(round(1000.0 / source_fps))
     print(f"Source FPS: {source_fps:.2f}, frame_delay_ms={frame_delay_ms}")
+    print(f"Current source: {'Webcam' if use_webcam else 'Video file'}")
+    print("Press 'w' for webcam, 'v' for video file, 'q' or ESC to quit")
+    print("Left-click to add target points, right-click to remove last point")
+    print("Press 'c' to clear all points")
 
     window_name = 'MediaPipe Face Mesh with Pose'
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -204,8 +239,8 @@ def main():
                         image=annotated,
                         landmark_list=face_landmarks,
                         connections=mp_face_mesh.FACEMESH_CONTOURS,
-                        landmark_drawing_spec=None,
-                        connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style()
+                        landmark_drawing_spec=thin_landmark_spec,
+                        connection_drawing_spec=thin_connection_spec
                     )
 
             # Show the annotated frame (do not flip for video clarity)
@@ -216,6 +251,37 @@ def main():
             key = cv2.waitKey(wait_ms) & 0xFF
             if key == 27 or key == ord('q'):
                 break
+            elif key == ord('c'):  # Clear all points
+                target_points.clear()
+                print("All target points cleared")
+            elif key == ord('w'):  # Switch to webcam
+                if not use_webcam:
+                    use_webcam = True
+                    cap.release()
+                    cap = open_capture(0)
+                    if cap.isOpened():
+                        source_fps = cap.get(cv2.CAP_PROP_FPS)
+                        if source_fps is None or source_fps <= 0:
+                            source_fps = 30.0
+                        frame_delay_ms = int(round(1000.0 / source_fps))
+                        print(f"Switched to WEBCAM - FPS: {source_fps:.2f}")
+                    else:
+                        print("ERROR: Could not open webcam")
+                        use_webcam = False
+                        cap = open_capture(file_name)
+            elif key == ord('v'):  # Switch to video file
+                if use_webcam:
+                    use_webcam = False
+                    cap.release()
+                    cap = open_capture(file_name)
+                    if cap.isOpened():
+                        source_fps = cap.get(cv2.CAP_PROP_FPS)
+                        if source_fps is None or source_fps <= 0:
+                            source_fps = 30.0
+                        frame_delay_ms = int(round(1000.0 / source_fps))
+                        print(f"Switched to VIDEO FILE - FPS: {source_fps:.2f}")
+                    else:
+                        print("ERROR: Could not open video file")
 
     cap.release()
     cv2.destroyAllWindows()
